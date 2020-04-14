@@ -29,12 +29,21 @@ data State =
     }
 
 potentialCells :: State -> [Cell]
-potentialCells State {alive = alive, adjacent = adjacent} =
-  uniq . sort . concatMap adjacent . S.toList $ alive
+potentialCells s = uniq . sort . concatMap (adjacent s) . S.toList . alive $ s
 
 neighbours :: State -> Cell -> Int
-neighbours State {alive = alive, adjacent = adjacent} =
-  length . filter (`S.member` alive) . adjacent
+neighbours s = length . filter (`S.member` alive s) . adjacent s
+
+adjacentRec :: State -> Cell -> Int -> S.Set Cell
+adjacentRec s c 0 = S.singleton c
+adjacentRec s c n = S.union a b
+  where
+    a = adjacentRec s c (n - 1)
+    b = S.fromList . concatMap (adjacent s) . S.toList $ a
+
+neighboursRec :: State -> Cell -> Int -> Int
+neighboursRec s c n =
+  length . filter (`S.member` alive s) . S.toList $ adjacentRec s c n
 
 nextState :: State -> State
 nextState s = s {alive = S.fromList . filter f . potentialCells $ s}
@@ -46,16 +55,16 @@ gameOfLife = iterate nextState
 
 -- Universe parameters
 xmin :: Int
-xmin = -100
+xmin = -50
 
 xmax :: Int
-xmax = 100
+xmax = 50
 
 ymin :: Int
-ymin = -100
+ymin = -50
 
 ymax :: Int
-ymax = 100
+ymax = 50
 
 -- Adjacent functions
 adjacentEuclidean :: Cell -> [Cell]
@@ -105,7 +114,7 @@ randomState :: (Cell -> [Cell]) -> IO State
 randomState adj =
   stateFromList adj <$>
   replicateM
-    6000
+    3200
     (liftM2
        (\x y ->
           ( (x `mod` (xmax - xmin + 1)) + xmin
@@ -143,27 +152,21 @@ colorFromRGB :: C.RGB Float -> Color
 colorFromRGB c =
   makeColor (C.channelRed c) (C.channelGreen c) (C.channelBlue c) 1
 
-cellColor :: Cell -> Color
-cellColor (Cell (x, y)) =
-  colorFromRGB
-    (C.hsl
-       (fromIntegral (x - xmin + ymax - y) /
-        fromIntegral (xmax - xmin + ymax - ymin) *
-        360)
-       0.8
-       0.6)
+cellColor :: State -> Cell -> Color
+cellColor s c =
+  colorFromRGB (C.hsl (fromIntegral (neighboursRec s c 3 - 1) * 15) 0.8 0.6)
 
-cellToPicture :: Cell -> Maybe Picture
-cellToPicture c@(Cell (x, y))
+cellToPicture :: State -> Cell -> Maybe Picture
+cellToPicture s c@(Cell (x, y))
   | xmin <= x && x <= xmax && ymin <= y && y <= ymax =
     Just
-      (color (cellColor c) .
+      (color (cellColor s c) .
        translate (cellDim * fromIntegral x) (cellDim * fromIntegral y) $
        rectangleSolid cellDim cellDim)
   | otherwise = Nothing
 
 drawState :: State -> Picture
-drawState = pictures . mapMaybe cellToPicture . S.toList . alive
+drawState s = pictures . mapMaybe (cellToPicture s) . S.toList . alive $ s
 
 main :: IO ()
 main = do
