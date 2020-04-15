@@ -1,14 +1,17 @@
 module Main where
 
 import Control.Monad
+import Control.Monad.Trans.State.Strict
 import qualified Data.Colour.RGBSpace as C
 import qualified Data.Colour.RGBSpace.HSL as C
 import Data.List
 import Data.Maybe
 import qualified Data.Set as S
 import Graphics.Gloss
+import Graphics.Gloss.Interface.IO.Simulate
 import System.Random
 
+-- Utility functions
 uniq :: Eq a => [a] -> [a]
 uniq [] = []
 uniq [x] = [x]
@@ -17,59 +20,58 @@ uniq (x:y:xs) =
     then uniq (x : xs)
     else x : uniq xs
 
--- Game Logic
-newtype Cell =
-  Cell (Int, Int)
-  deriving (Eq, Ord, Show)
+colorFromRGB :: C.RGB Float -> Color
+colorFromRGB c =
+  makeColor (C.channelRed c) (C.channelGreen c) (C.channelBlue c) 1
 
-data State =
-  State
+-- Game logic
+type GridDim = (Int, Int, Int, Int) -- (xmin, xmax, ymin, ymax)
+
+type Cell = (Int, Int)
+
+data World =
+  World
     { alive :: S.Set Cell
     , adjacent :: Cell -> [Cell]
+    , dimensions :: GridDim
     }
 
-potentialCells :: State -> [Cell]
-potentialCells s = uniq . sort . concatMap (adjacent s) . S.toList . alive $ s
+type WorldS = StateT World IO
 
-neighbours :: State -> Cell -> Int
-neighbours s = length . filter (`S.member` alive s) . adjacent s
+potentialCells :: WorldS [Cell]
+potentialCells =
+  gets (\w -> uniq . sort . concatMap (adjacent w) . S.toList . alive $ w)
 
-adjacentRec :: State -> Cell -> Int -> S.Set Cell
-adjacentRec s c 0 = S.singleton c
-adjacentRec s c n = S.union a b
-  where
-    a = adjacentRec s c (n - 1)
-    b = S.fromList . concatMap (adjacent s) . S.toList $ a
+neighbours :: WorldS (Cell -> Int)
+neighbours = gets (\w -> length . filter (`S.member` alive w) . adjacent w)
 
-neighboursRec :: State -> Cell -> Int -> Int
-neighboursRec s c n =
-  length . filter (`S.member` alive s) . S.toList $ adjacentRec s c n
+-- NOTE: Might need to change to Int -> WorldS (Cell -> S.Set Cell)
+adjacentRec :: Int -> WorldS (Cell -> S.Set Cell)
+adjacentRec 0 = gets (const S.singleton)
+adjacentRec n =
+  adjacentRec (n - 1) >>=
+  (\a -> gets (\w -> S.fromList . concatMap (adjacent w) . S.toList . a))
 
-nextState :: State -> State
-nextState s = s {alive = S.fromList . filter f . potentialCells $ s}
-  where
-    f x = neighbours s x == 3 || (neighbours s x == 2 && x `S.member` alive s)
+neighboursRec :: Int -> WorldS (Cell -> Int)
+neighboursRec n =
+  adjacentRec n >>=
+  (\a -> gets (\w -> S.size . S.filter (`S.member` alive w) . a))
 
-gameOfLife :: State -> [State]
-gameOfLife = iterate nextState
+isAliveNext :: WorldS (Cell -> Bool)
+isAliveNext =
+  neighbours >>=
+  (\nbrs -> gets (\w c -> nbrs c == 3 || (nbrs c == 2 && c `S.member` alive w)))
 
--- Universe parameters
-xmin :: Int
-xmin = -50
+nextWorld :: WorldS ()
+nextWorld =
+  potentialCells >>=
+  (\p ->
+     isAliveNext >>=
+     (\f -> modify (\w -> w {alive = S.fromList . filter f $ p})))
 
-xmax :: Int
-xmax = 50
-
-ymin :: Int
-ymin = -50
-
-ymax :: Int
-ymax = 50
-
--- Adjacent functions
-adjacentEuclidean :: Cell -> [Cell]
-adjacentEuclidean (Cell (x, y)) =
-  Cell <$>
+-- Adjacency functions
+adjacentEuclidean :: GridDim -> Cell -> [Cell]
+adjacentEuclidean _ (x, y) =
   [ (x - 1, y - 1)
   , (x - 1, y)
   , (x - 1, y + 1)
@@ -80,9 +82,9 @@ adjacentEuclidean (Cell (x, y)) =
   , (x + 1, y + 1)
   ]
 
-adjacentTorus :: Cell -> [Cell]
-adjacentTorus (Cell (x, y)) =
-  Cell . wrap <$>
+adjacentTorus :: GridDim -> Cell -> [Cell]
+adjacentTorus (xmin, xmax, ymin, ymax) (x, y) =
+  wrap <$>
   [ (x - 1, y - 1)
   , (x - 1, y)
   , (x - 1, y + 1)
@@ -98,23 +100,26 @@ adjacentTorus (Cell (x, y)) =
       , (y - ymin) `mod` (ymax - ymin + 1) + ymin)
 
 -- Some interesting initial states
-stateFromList :: (Cell -> [Cell]) -> [(Int, Int)] -> State
-stateFromList adj l = State {alive = S.fromList $ Cell <$> l, adjacent = adj}
+stateFromList :: GridDim -> (GridDim -> Cell -> [Cell]) -> [(Int, Int)] -> World
+stateFromList d adj l =
+  World {alive = S.fromList l, adjacent = adj d, dimensions = d}
 
-stateFromListEuclidean :: [(Int, Int)] -> State
-stateFromListEuclidean = stateFromList adjacentEuclidean
+blinker :: World
+blinker =
+  stateFromList (-5, 5, -5, 5) adjacentEuclidean [(0, -1), (0, 0), (0, 1)]
 
-blinker :: State
-blinker = stateFromListEuclidean [(0, -1), (0, 0), (0, 1)]
+toad :: World
+toad =
+  stateFromList
+    (-5, 5, -5, 5)
+    adjacentEuclidean
+    [(0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2)]
 
-toad :: State
-toad = stateFromListEuclidean [(0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2)]
-
-randomState :: (Cell -> [Cell]) -> IO State
-randomState adj =
-  stateFromList adj <$>
+randomWorld :: GridDim -> (GridDim -> Cell -> [Cell]) -> Int -> IO World
+randomWorld d@(xmin, xmax, ymin, ymax) adj n =
+  stateFromList d adj <$>
   replicateM
-    3200
+    n
     (liftM2
        (\x y ->
           ( (x `mod` (xmax - xmin + 1)) + xmin
@@ -126,8 +131,9 @@ randomState adj =
 cellDim :: Float
 cellDim = 10
 
-grid :: Picture
-grid = pictures . map (color (greyN 0.4)) $ vLines ++ hLines
+grid :: GridDim -> Picture
+grid (xmin, xmax, ymin, ymax) =
+  pictures . map (color (greyN 0.4)) $ vLines ++ hLines
   where
     vLines =
       map
@@ -148,31 +154,53 @@ grid = pictures . map (color (greyN 0.4)) $ vLines ++ hLines
          fromIntegral)
         [ymin .. ymax + 1]
 
-colorFromRGB :: C.RGB Float -> Color
-colorFromRGB c =
-  makeColor (C.channelRed c) (C.channelGreen c) (C.channelBlue c) 1
+isVisible :: WorldS (Cell -> Bool)
+isVisible =
+  gets
+    (\w (x, y) ->
+       let (xmin, xmax, ymin, ymax) = dimensions w
+        in xmin <= x && x <= xmax && ymin <= y && y <= ymax)
 
-cellColor :: State -> Cell -> Color
-cellColor s c =
-  colorFromRGB (C.hsl (fromIntegral (neighboursRec s c 3 - 1) * 15) 0.8 0.6)
+cellColor :: WorldS (Cell -> Color)
+cellColor =
+  neighboursRec 3 >>=
+  (\nbrs ->
+     gets
+       (\w c -> colorFromRGB (C.hsl (fromIntegral (nbrs c - 1) * 15) 0.8 0.6)))
 
-cellToPicture :: State -> Cell -> Maybe Picture
-cellToPicture s c@(Cell (x, y))
-  | xmin <= x && x <= xmax && ymin <= y && y <= ymax =
-    Just
-      (color (cellColor s c) .
-       translate (cellDim * fromIntegral x) (cellDim * fromIntegral y) $
-       rectangleSolid cellDim cellDim)
-  | otherwise = Nothing
+cellToPicture :: WorldS (Cell -> Maybe Picture)
+cellToPicture =
+  isVisible >>=
+  (\vis ->
+     cellColor >>=
+     (\col ->
+        gets
+          (\w c@(x, y) ->
+             if vis c
+               then Just
+                      (color (col c) .
+                       translate
+                         (cellDim * fromIntegral x)
+                         (cellDim * fromIntegral y) $
+                       rectangleSolid cellDim cellDim)
+               else Nothing)))
 
-drawState :: State -> Picture
-drawState s = pictures . mapMaybe (cellToPicture s) . S.toList . alive $ s
+drawWorld :: WorldS Picture
+drawWorld =
+  cellToPicture >>=
+  (\pic ->
+     gets
+       (\w ->
+          pictures . (grid (dimensions w) :) . mapMaybe pic . S.toList . alive $
+          w))
 
 main :: IO ()
 main = do
-  s <- randomState adjacentTorus
-  let states = gameOfLife s
-  animate
+  s <- randomWorld (-20, 20, -20, 20) adjacentTorus 800
+  simulateIO
     (InWindow "Conway's Game of Life" (300, 300) (0, 0))
     (greyN 0.1)
-    (\x -> pictures [grid, drawState (states !! floor (10 * x))])
+    15
+    s
+    (evalStateT drawWorld)
+    (\_ _ -> execStateT nextWorld)
