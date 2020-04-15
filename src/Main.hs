@@ -99,41 +99,68 @@ adjacentTorus (xmin, xmax, ymin, ymax) (x, y) =
       ( (x - xmin) `mod` (xmax - xmin + 1) + xmin
       , (y - ymin) `mod` (ymax - ymin + 1) + ymin)
 
--- Some interesting initial states
+-- Tnitial states builders
 stateFromList :: GridDim -> (GridDim -> Cell -> [Cell]) -> [(Int, Int)] -> World
 stateFromList d adj l =
   World {alive = S.fromList l, adjacent = adj d, dimensions = d}
 
-blinker :: World
-blinker =
-  stateFromList (-5, 5, -5, 5) adjacentEuclidean [(0, -1), (0, 0), (0, 1)]
+centralize :: [(Int, Int)] -> (Int, Int, [(Int, Int)])
+centralize l =
+  ( (xmax - xmin + 1) `div` 2
+  , (ymax - ymin + 1) `div` 2
+  , map (\(x, y) -> (x - xc, y - yc)) l)
+  where
+    xmin = minimum . map fst $ l
+    xmax = maximum . map fst $ l
+    ymin = minimum . map snd $ l
+    ymax = maximum . map snd $ l
+    xc = (xmin + xmax) `div` 2
+    yc = (ymin + ymax) `div` 2
 
-toad :: World
-toad =
-  stateFromList
-    (-5, 5, -5, 5)
-    adjacentEuclidean
-    [(0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2)]
+stateFromListAuto :: [(Int, Int)] -> World
+stateFromListAuto l = stateFromList (-d, d, -d, d) adjacentEuclidean l2
+  where
+    (dx, dy, l2) = centralize l
+    d = 4 * max dx dy
 
-randomWorld :: GridDim -> (GridDim -> Cell -> [Cell]) -> Int -> IO World
-randomWorld d@(xmin, xmax, ymin, ymax) adj n =
-  stateFromList d adj <$>
-  replicateM
-    n
-    (liftM2
-       (\x y ->
-          ( (x `mod` (xmax - xmin + 1)) + xmin
-          , (y `mod` (ymax - ymin + 1)) + ymin))
-       randomIO
-       randomIO)
+-- Read .cells files from stdin
+parseCells :: IO World
+parseCells = do
+  lns <- dropWhile ((== Just '!') . listToMaybe) . lines <$> getContents
+  let t =
+        concat $
+        zipWith
+          (\y ->
+             catMaybes .
+             zipWith
+               (\x c ->
+                  if c == 'O'
+                    then Just (x, y)
+                    else Nothing)
+               [0 ..])
+          [0,-1 ..]
+          lns
+  return $ stateFromListAuto t
+
+-- Random initial state
+randomWorld :: GridDim -> (GridDim -> Cell -> [Cell]) -> Float -> IO World
+randomWorld d@(xmin, xmax, ymin, ymax) adj p =
+  stateFromList d adj . catMaybes <$>
+  mapM
+    (\x -> do
+       r1 <- randomRIO (0.0, 1.0) :: IO Float
+       return $
+         if r1 < p
+           then Just x
+           else Nothing)
+    (liftM2 (,) [xmin .. xmax] [ymin .. ymax])
 
 -- Animation
 cellDim :: Float
-cellDim = 10
+cellDim = 16
 
 grid :: GridDim -> Picture
-grid (xmin, xmax, ymin, ymax) =
-  pictures . map (color (greyN 0.4)) $ vLines ++ hLines
+grid (xmin, xmax, ymin, ymax) = color (greyN 0.4) . pictures $ vLines ++ hLines
   where
     vLines =
       map
@@ -195,8 +222,9 @@ drawWorld =
           w))
 
 main :: IO ()
-main = do
-  s <- randomWorld (-20, 20, -20, 20) adjacentTorus 800
+main
+ = do
+  s <- parseCells
   simulateIO
     (InWindow "Conway's Game of Life" (300, 300) (0, 0))
     (greyN 0.1)
