@@ -40,34 +40,39 @@ type WorldS = StateT World IO
 
 potentialCells :: WorldS [Cell]
 potentialCells =
-  gets (\w -> uniq . sort . concatMap (adjacent w) . S.toList . alive $ w)
+  gets adjacent >>= \adj ->
+    uniq . sort . concatMap adj . S.toList <$> gets alive
 
 neighbours :: WorldS (Cell -> Int)
-neighbours = gets (\w -> length . filter (`S.member` alive w) . adjacent w)
+neighbours =
+  gets alive >>= \al -> ((length . filter (`S.member` al)) .) <$> gets adjacent
 
--- NOTE: Might need to change to Int -> WorldS (Cell -> S.Set Cell)
+xx :: Monad m => m (b -> c) -> m (a -> b) -> m (a -> c)
+xx f g = f >>= \f -> (f .) <$> g
+
 adjacentRec :: Int -> WorldS (Cell -> S.Set Cell)
-adjacentRec 0 = gets (const S.singleton)
+adjacentRec 0 = return S.singleton
 adjacentRec n =
-  adjacentRec (n - 1) >>=
-  (\a -> gets (\w -> S.fromList . concatMap (adjacent w) . S.toList . a))
+  gets adjacent >>= \adj ->
+    ((S.fromList . concatMap adj . S.toList) .) <$> adjacentRec (n - 1)
 
 neighboursRec :: Int -> WorldS (Cell -> Int)
 neighboursRec n =
-  adjacentRec n >>=
-  (\a -> gets (\w -> S.size . S.filter (`S.member` alive w) . a))
+  gets alive >>= \al ->
+    ((S.size . S.filter (`S.member` al)) .) <$> adjacentRec n
 
 isAliveNext :: WorldS (Cell -> Bool)
 isAliveNext =
-  neighbours >>=
-  (\nbrs -> gets (\w c -> nbrs c == 3 || (nbrs c == 2 && c `S.member` alive w)))
+  gets alive >>= \al ->
+    neighbours >>= \nbrs ->
+      return (\c -> nbrs c == 3 || (nbrs c == 2 && c `S.member` al))
+
+withAlive :: S.Set Cell -> WorldS ()
+withAlive alive = modify (\w -> w {alive = alive})
 
 nextWorld :: WorldS ()
 nextWorld =
-  potentialCells >>=
-  (\p ->
-     isAliveNext >>=
-     (\f -> modify (\w -> w {alive = S.fromList . filter f $ p})))
+  isAliveNext >>= \f -> (S.fromList . filter f <$> potentialCells) >>= withAlive
 
 -- Adjacency functions
 adjacentEuclidean :: GridDim -> Cell -> [Cell]
@@ -125,22 +130,14 @@ stateFromListAuto l = stateFromList (-d, d, -d, d) adjacentEuclidean l2
 
 -- Read .cells files from stdin
 parseCells :: IO World
-parseCells = do
-  lns <- dropWhile ((== Just '!') . listToMaybe) . lines <$> getContents
-  let t =
-        concat $
-        zipWith
-          (\y ->
-             catMaybes .
-             zipWith
-               (\x c ->
-                  if c == 'O'
-                    then Just (x, y)
-                    else Nothing)
-               [0 ..])
-          [0,-1 ..]
-          lns
-  return $ stateFromListAuto t
+parseCells =
+  stateFromListAuto .
+  map snd .
+  filter fst .
+  concat .
+  zipWith (\y -> zipWith (\x c -> (c == 'O', (x, y))) [0 ..]) [0,-1 ..] .
+  dropWhile ((== Just '!') . listToMaybe) . lines <$>
+  getContents
 
 -- Random initial state
 randomWorld :: GridDim -> (GridDim -> Cell -> [Cell]) -> Float -> IO World
@@ -163,67 +160,52 @@ grid :: GridDim -> Picture
 grid (xmin, xmax, ymin, ymax) = color (greyN 0.4) . pictures $ vLines ++ hLines
   where
     vLines =
-      map
-        ((\x ->
-            line
-              [ ((x - 0.5) * cellDim, (fromIntegral ymin - 0.5) * cellDim)
-              , ((x - 0.5) * cellDim, (fromIntegral ymax + 0.5) * cellDim)
-              ]) .
-         fromIntegral)
-        [xmin .. xmax + 1]
+      (\x ->
+         line
+           ((\y -> ((x - 0.5) * cellDim, (fromIntegral y - 0.5) * cellDim)) <$>
+            [ymin, ymax + 1])) .
+      fromIntegral <$>
+      [xmin .. xmax + 1]
     hLines =
-      map
-        ((\y ->
-            line
-              [ ((fromIntegral xmin - 0.5) * cellDim, (y - 0.5) * cellDim)
-              , ((fromIntegral xmax + 0.5) * cellDim, (y - 0.5) * cellDim)
-              ]) .
-         fromIntegral)
-        [ymin .. ymax + 1]
+      (\y ->
+         line
+           ((\x -> ((fromIntegral x - 0.5) * cellDim, (y - 0.5) * cellDim)) <$>
+            [xmin, xmax + 1])) .
+      fromIntegral <$>
+      [ymin .. ymax + 1]
 
 isVisible :: WorldS (Cell -> Bool)
 isVisible =
-  gets
-    (\w (x, y) ->
-       let (xmin, xmax, ymin, ymax) = dimensions w
-        in xmin <= x && x <= xmax && ymin <= y && y <= ymax)
+  gets dimensions >>= \(xmin, xmax, ymin, ymax) ->
+    return (\(x, y) -> xmin <= x && x <= xmax && ymin <= y && y <= ymax)
 
 cellColor :: WorldS (Cell -> Color)
 cellColor =
-  neighboursRec 3 >>=
-  (\nbrs ->
-     gets
-       (\w c -> colorFromRGB (C.hsl (fromIntegral (nbrs c - 1) * 15) 0.8 0.6)))
+  neighboursRec 3 >>= \nbrs ->
+    return (\c -> colorFromRGB (C.hsl (fromIntegral (nbrs c - 1) * 15) 0.8 0.6))
 
 cellToPicture :: WorldS (Cell -> Maybe Picture)
 cellToPicture =
-  isVisible >>=
-  (\vis ->
-     cellColor >>=
-     (\col ->
-        gets
-          (\w c@(x, y) ->
-             if vis c
-               then Just
-                      (color (col c) .
-                       translate
-                         (cellDim * fromIntegral x)
-                         (cellDim * fromIntegral y) $
-                       rectangleSolid cellDim cellDim)
-               else Nothing)))
+  isVisible >>= \vis ->
+    cellColor >>= \col ->
+      return $ \c@(x, y) ->
+        if vis c
+          then Just
+                 (color (col c) .
+                  translate
+                    (cellDim * fromIntegral x)
+                    (cellDim * fromIntegral y) $
+                  rectangleSolid cellDim cellDim)
+          else Nothing
 
 drawWorld :: WorldS Picture
 drawWorld =
-  cellToPicture >>=
-  (\pic ->
-     gets
-       (\w ->
-          pictures . (grid (dimensions w) :) . mapMaybe pic . S.toList . alive $
-          w))
+  cellToPicture >>= \pic ->
+    gets dimensions >>= \d ->
+      gets (pictures . (grid d :) . mapMaybe pic . S.toList . alive)
 
 main :: IO ()
-main
- = do
+main = do
   s <- parseCells
   simulateIO
     (InWindow "Conway's Game of Life" (300, 300) (0, 0))
