@@ -99,7 +99,7 @@ adjacentTorus (xmin, xmax, ymin, ymax) (x, y) =
       ( (x - xmin) `mod` (xmax - xmin + 1) + xmin
       , (y - ymin) `mod` (ymax - ymin + 1) + ymin)
 
--- Tnitial states builders
+-- Tnitial state builders
 stateFromList :: GridDim -> (GridDim -> Cell -> [Cell]) -> [(Int, Int)] -> World
 stateFromList d adj l =
   World {alive = S.fromList l, adjacent = adj d, dimensions = d}
